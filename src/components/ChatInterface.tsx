@@ -2,15 +2,17 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { Send, Loader2 } from 'lucide-react';
+import { Send, Loader2, AlertCircle, InfoIcon } from 'lucide-react';
 import { supabase } from '@/integrations/supabase/client';
 import { toast } from '@/components/ui/use-toast';
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 
 interface Message {
   id: string;
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: Date;
+  debugInfo?: any;
 }
 
 interface ChatInterfaceProps {
@@ -25,6 +27,8 @@ const ChatInterface = ({ documentId }: ChatInterfaceProps) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [user, setUser] = useState<any>(null);
   const [documentTitle, setDocumentTitle] = useState<string>('');
+  const [showDebugInfo, setShowDebugInfo] = useState(false);
+  const [documentDetails, setDocumentDetails] = useState<any>(null);
 
   // Get the current user
   useEffect(() => {
@@ -36,39 +40,72 @@ const ChatInterface = ({ documentId }: ChatInterfaceProps) => {
     getUser();
   }, []);
 
-  // Get the document title whenever the documentId changes
+  // Get document details including processing status
   useEffect(() => {
-    const fetchDocumentTitle = async () => {
+    const fetchDocumentDetails = async () => {
+      if (!documentId) return;
+
       try {
-        const { data, error } = await supabase
+        // Get document metadata
+        const { data: document, error } = await supabase
           .from('documents')
-          .select('title')
+          .select('*')
           .eq('id', documentId)
           .single();
           
         if (error) throw error;
         
-        setDocumentTitle(data.title);
+        setDocumentTitle(document.title);
+        setDocumentDetails(document);
         
-        // Add a welcome message with the document name
-        if (messages.length === 0) {
-          setMessages([
-            {
-              id: 'welcome',
-              role: 'assistant',
-              content: `Hallo! Ich bin DocuChat, dein Assistent für das Dokument "${data.title}". Was möchtest du über dieses Dokument wissen?`,
-              timestamp: new Date()
-            }
-          ]);
+        // Check if document has chunks
+        const { count, error: countError } = await supabase
+          .from('document_chunks')
+          .select('id', { count: 'exact', head: true })
+          .eq('document_id', documentId);
+          
+        if (countError) throw countError;
+        
+        // Add system message about document processing status
+        const systemMessages: Message[] = [];
+        
+        systemMessages.push({
+          id: 'welcome',
+          role: 'assistant',
+          content: `Hallo! Ich bin DocuChat, dein Assistent für das Dokument "${document.title}". Was möchtest du über dieses Dokument wissen?`,
+          timestamp: new Date()
+        });
+        
+        if (count === 0) {
+          systemMessages.push({
+            id: 'processing-warning',
+            role: 'system',
+            content: `⚠️ Dieses Dokument hat keine verarbeiteten Textabschnitte. Das könnte bedeuten, dass die Verarbeitung noch läuft oder fehlgeschlagen ist. Versuche das Dokument erneut hochzuladen oder warte einen Moment.`,
+            timestamp: new Date(),
+            debugInfo: { documentInfo: document, chunkCount: count }
+          });
+        } else {
+          systemMessages.push({
+            id: 'processing-info',
+            role: 'system',
+            content: `ℹ️ Dieses Dokument hat ${count} verarbeitete Textabschnitte.`,
+            timestamp: new Date(),
+            debugInfo: { documentInfo: document, chunkCount: count }
+          });
         }
+        
+        setMessages(systemMessages);
       } catch (error) {
-        console.error('Error fetching document title:', error);
+        console.error('Error fetching document details:', error);
+        toast({
+          title: "Fehler bei Dokumentdetails",
+          description: "Es gab ein Problem beim Abrufen der Dokumentdetails.",
+          variant: "destructive",
+        });
       }
     };
     
-    if (documentId) {
-      fetchDocumentTitle();
-    }
+    fetchDocumentDetails();
   }, [documentId]);
   
   // Load chat history when documentId changes
@@ -86,19 +123,10 @@ const ChatInterface = ({ documentId }: ChatInterfaceProps) => {
           
         if (error) throw error;
         
-        const formattedMessages: Message[] = [];
-        
-        // Add welcome message if there's no history
-        if (data.length === 0) {
-          if (documentTitle) {
-            formattedMessages.push({
-              id: 'welcome',
-              role: 'assistant',
-              content: `Hallo! Ich bin DocuChat, dein Assistent für das Dokument "${documentTitle}". Was möchtest du über dieses Dokument wissen?`,
-              timestamp: new Date()
-            });
-          }
-        } else {
+        // If we have chat history, replace the welcome messages with the history
+        if (data && data.length > 0) {
+          const formattedMessages: Message[] = [];
+          
           // Format the chat history into messages
           data.forEach((item, index) => {
             // Add user question
@@ -117,9 +145,13 @@ const ChatInterface = ({ documentId }: ChatInterfaceProps) => {
               timestamp: new Date(item.created_at)
             });
           });
+          
+          // Prepend the system messages
+          setMessages((prevMessages) => {
+            const systemMessages = prevMessages.filter(msg => msg.role === 'system');
+            return [...systemMessages, ...formattedMessages];
+          });
         }
-        
-        setMessages(formattedMessages);
       } catch (error) {
         console.error('Error fetching chat history:', error);
       }
@@ -170,12 +202,27 @@ const ChatInterface = ({ documentId }: ChatInterfaceProps) => {
       
       if (error) throw error;
       
+      // Check if there are any chunks found
+      let debugInfo = data.debug || {};
+      let content = data.answer;
+      
+      if (data.relevantChunks && data.relevantChunks.length === 0) {
+        content = "Ich konnte keine relevanten Informationen im Dokument finden, um deine Frage zu beantworten. Möglicherweise wurde das Dokument nicht vollständig verarbeitet oder enthält nicht die gesuchten Informationen.";
+        
+        // Add debug information
+        debugInfo = {
+          ...debugInfo,
+          noChunksFound: true
+        };
+      }
+      
       // Add assistant's response
       const assistantMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        content: data.answer || "Entschuldigung, ich konnte keine Antwort generieren. Bitte versuche es mit einer anderen Frage.",
-        timestamp: new Date()
+        content: content || "Entschuldigung, ich konnte keine Antwort generieren. Bitte versuche es mit einer anderen Frage.",
+        timestamp: new Date(),
+        debugInfo: debugInfo
       };
       
       setMessages((prev) => [...prev, assistantMessage]);
@@ -185,6 +232,17 @@ const ChatInterface = ({ documentId }: ChatInterfaceProps) => {
       setErrorMessage(
         "Es gab ein Problem bei der Verarbeitung deiner Anfrage. Bitte versuche es später erneut."
       );
+      
+      // Add error message as system message
+      const errorDebugMessage: Message = {
+        id: `error-${Date.now()}`,
+        role: 'system',
+        content: `Fehler bei der Verarbeitung: ${error.message || "Unbekannter Fehler"}`,
+        timestamp: new Date(),
+        debugInfo: { error }
+      };
+      
+      setMessages((prev) => [...prev, errorDebugMessage]);
       
       toast({
         title: "Fehler",
@@ -196,12 +254,88 @@ const ChatInterface = ({ documentId }: ChatInterfaceProps) => {
     }
   };
 
+  const reprocessDocument = async () => {
+    if (!documentId || !user) return;
+
+    setIsLoading(true);
+    try {
+      // Call the process-document function
+      const { error } = await supabase.functions.invoke('process-document', {
+        body: { documentId }
+      });
+      
+      if (error) throw error;
+      
+      toast({
+        title: "Verarbeitung gestartet",
+        description: "Das Dokument wird erneut verarbeitet. Dies kann einige Momente dauern.",
+      });
+      
+      // Add system message
+      const systemMessage: Message = {
+        id: `reprocess-${Date.now()}`,
+        role: 'system',
+        content: `🔄 Dokument wird erneut verarbeitet. Bitte warte einen Moment, bevor du weitere Fragen stellst.`,
+        timestamp: new Date()
+      };
+      
+      setMessages((prev) => [...prev, systemMessage]);
+    } catch (error: any) {
+      console.error('Error reprocessing document:', error);
+      
+      toast({
+        title: "Fehler bei der Verarbeitung",
+        description: error.message || "Es gab ein Problem bei der erneuten Verarbeitung des Dokuments.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const toggleDebugInfo = () => {
+    setShowDebugInfo(!showDebugInfo);
+  };
+
   return (
     <div className="flex flex-col h-full rounded-lg border border-gray-200 overflow-hidden bg-white">
       {/* Chat header */}
-      <div className="py-3 px-4 border-b border-gray-200 bg-gray-50">
+      <div className="py-3 px-4 border-b border-gray-200 bg-gray-50 flex justify-between items-center">
         <h2 className="font-medium">Chat mit Dokument: {documentTitle}</h2>
+        <div className="flex gap-2">
+          <Button 
+            variant="outline" 
+            size="sm" 
+            onClick={reprocessDocument}
+            disabled={isLoading}
+          >
+            Dokument neu verarbeiten
+          </Button>
+          <Button 
+            variant="ghost" 
+            size="sm"
+            onClick={toggleDebugInfo}
+          >
+            <InfoIcon className="h-4 w-4" />
+          </Button>
+        </div>
       </div>
+      
+      {/* Debug panel */}
+      {showDebugInfo && documentDetails && (
+        <div className="p-3 bg-gray-50 border-b border-gray-200 text-xs">
+          <Accordion type="single" collapsible>
+            <AccordionItem value="document-info">
+              <AccordionTrigger className="py-2">Dokumentinformationen</AccordionTrigger>
+              <AccordionContent>
+                <pre className="bg-gray-100 p-2 rounded overflow-auto max-h-60">
+                  {JSON.stringify(documentDetails, null, 2)}
+                </pre>
+              </AccordionContent>
+            </AccordionItem>
+          </Accordion>
+        </div>
+      )}
       
       {/* Messages area */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
@@ -209,20 +343,24 @@ const ChatInterface = ({ documentId }: ChatInterfaceProps) => {
           <div
             key={message.id}
             className={`flex ${
-              message.role === 'user' ? 'justify-end' : 'justify-start'
+              message.role === 'user' ? 'justify-end' : 
+              message.role === 'system' ? 'justify-center' : 'justify-start'
             }`}
           >
             <div
               className={`max-w-[80%] rounded-lg p-3 ${
                 message.role === 'user'
                   ? 'bg-docuchat-primary text-white'
+                  : message.role === 'system'
+                  ? 'bg-yellow-50 text-yellow-800 border border-yellow-200'
                   : 'bg-gray-100 text-gray-800'
               }`}
             >
               <p className="whitespace-pre-wrap">{message.content}</p>
               <div
                 className={`text-xs mt-1 ${
-                  message.role === 'user' ? 'text-blue-100' : 'text-gray-500'
+                  message.role === 'user' ? 'text-blue-100' : 
+                  message.role === 'system' ? 'text-yellow-600' : 'text-gray-500'
                 }`}
               >
                 {message.timestamp.toLocaleTimeString([], {
@@ -230,6 +368,22 @@ const ChatInterface = ({ documentId }: ChatInterfaceProps) => {
                   minute: '2-digit',
                 })}
               </div>
+
+              {/* Debug info for message */}
+              {showDebugInfo && message.debugInfo && (
+                <div className="mt-2 pt-2 border-t border-gray-200">
+                  <Accordion type="single" collapsible>
+                    <AccordionItem value="debug-info">
+                      <AccordionTrigger className="py-1 text-xs">Debug Infos</AccordionTrigger>
+                      <AccordionContent>
+                        <pre className="bg-gray-100 p-2 rounded overflow-auto max-h-40 text-xs">
+                          {JSON.stringify(message.debugInfo, null, 2)}
+                        </pre>
+                      </AccordionContent>
+                    </AccordionItem>
+                  </Accordion>
+                </div>
+              )}
             </div>
           </div>
         ))}

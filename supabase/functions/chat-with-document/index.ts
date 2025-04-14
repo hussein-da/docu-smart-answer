@@ -25,6 +25,8 @@ const corsHeaders = {
 // Function to create embeddings using OpenAI's API
 async function createEmbedding(text: string): Promise<number[]> {
   try {
+    console.log(`Creating embedding for text: "${text.substring(0, 100)}..."`);
+    
     const response = await fetch('https://api.openai.com/v1/embeddings', {
       method: 'POST',
       headers: {
@@ -44,6 +46,7 @@ async function createEmbedding(text: string): Promise<number[]> {
     }
     
     const data = await response.json();
+    console.log('Embedding created successfully');
     return data.data[0].embedding;
   } catch (error) {
     console.error('Error creating embedding:', error);
@@ -74,34 +77,92 @@ async function getRelevantChunks(documentId: string, questionEmbedding: number[]
       return [];
     }
     
-    // Get relevant chunks using the match_document_chunks function
-    const { data: chunks, error } = await supabase.rpc(
-      'match_document_chunks',
-      {
-        query_embedding: questionEmbedding,
-        document_id_filter: documentId,
-        match_threshold: 0.5,
-        match_count: limit
+    try {
+      // Get relevant chunks using the match_document_chunks function
+      const { data: chunks, error } = await supabase.rpc(
+        'match_document_chunks',
+        {
+          query_embedding: questionEmbedding,
+          document_id_filter: documentId,
+          match_threshold: 0.5,
+          match_count: limit
+        }
+      );
+      
+      if (error) {
+        console.error('Error in match_document_chunks:', error);
+        throw error;
       }
-    );
-    
-    if (error) {
-      console.error('Error in match_document_chunks:', error);
-      throw error;
+      
+      console.log(`Found ${chunks?.length || 0} relevant chunks`);
+      if (chunks && chunks.length > 0) {
+        chunks.forEach((chunk, i) => {
+          console.log(`Chunk ${i} similarity: ${chunk.similarity.toFixed(3)}, content: ${chunk.content.substring(0, 50)}...`);
+        });
+      }
+      
+      return chunks || [];
+    } catch (error) {
+      console.error('Error using match_document_chunks RPC:', error);
+      
+      // Fallback: Manual similarity search if RPC fails
+      console.log('Falling back to manual similarity search');
+      
+      const { data: allChunks, error: fetchError } = await supabase
+        .from('document_chunks')
+        .select('id, document_id, chunk_index, content, embedding')
+        .eq('document_id', documentId);
+        
+      if (fetchError) {
+        console.error('Error fetching chunks:', fetchError);
+        throw fetchError;
+      }
+      
+      if (!allChunks || allChunks.length === 0) {
+        return [];
+      }
+      
+      // Calculate similarity for each chunk
+      const chunksWithSimilarity = allChunks
+        .filter(chunk => chunk.embedding)
+        .map(chunk => {
+          // Calculate cosine similarity (1 - cosine distance)
+          const similarity = 1 - calculateCosineSimilarity(questionEmbedding, chunk.embedding);
+          return { ...chunk, similarity };
+        })
+        .filter(chunk => chunk.similarity > 0.5) // Apply threshold
+        .sort((a, b) => b.similarity - a.similarity) // Sort by similarity (highest first)
+        .slice(0, limit); // Take only the top matches
+      
+      return chunksWithSimilarity;
     }
-    
-    console.log(`Found ${chunks?.length || 0} relevant chunks`);
-    if (chunks && chunks.length > 0) {
-      chunks.forEach((chunk, i) => {
-        console.log(`Chunk ${i} similarity: ${chunk.similarity.toFixed(3)}, content: ${chunk.content.substring(0, 50)}...`);
-      });
-    }
-    
-    return chunks;
   } catch (error) {
     console.error('Error getting relevant chunks:', error);
     throw error;
   }
+}
+
+// Helper function to calculate cosine similarity
+function calculateCosineSimilarity(embedding1: number[], embedding2: number[]): number {
+  let dotProduct = 0;
+  let norm1 = 0;
+  let norm2 = 0;
+  
+  for (let i = 0; i < embedding1.length; i++) {
+    dotProduct += embedding1[i] * embedding2[i];
+    norm1 += embedding1[i] * embedding1[i];
+    norm2 += embedding2[i] * embedding2[i];
+  }
+  
+  norm1 = Math.sqrt(norm1);
+  norm2 = Math.sqrt(norm2);
+  
+  if (norm1 === 0 || norm2 === 0) {
+    return 1; // Maximum distance if either vector is zero
+  }
+  
+  const similarity = dotProduct / (norm1 * norm2);
+  return 1 - similarity; // Convert to distance
 }
 
 // Function to get document title
@@ -128,6 +189,11 @@ async function generateAnswer(question: string, chunks: any[], documentTitle: st
     // Prepare context from chunks
     const context = chunks.map(chunk => chunk.content).join('\n\n');
     console.log(`Context length for OpenAI: ${context.length} characters`);
+    
+    // If context is empty, return standard message
+    if (!context || context.trim() === '') {
+      return "Ich konnte keine relevanten Informationen im Dokument finden, um deine Frage zu beantworten.";
+    }
     
     // Create messages for the chat completion
     const messages = [
@@ -193,31 +259,72 @@ async function chatWithDocument(documentId: string, question: string, userId: st
     const relevantChunks = await getRelevantChunks(documentId, questionEmbedding);
     console.log('Got relevant chunks:', relevantChunks?.length || 0);
     
+    // Initialize debug info
+    const debugInfo = {
+      documentId,
+      questionLength: question.length,
+      relevantChunksCount: relevantChunks?.length || 0
+    };
+    
+    // If no relevant chunks, return early
     if (!relevantChunks || relevantChunks.length === 0) {
-      return { answer: "Ich konnte keine relevanten Informationen im Dokument finden, um deine Frage zu beantworten." };
+      // Store the chat history with empty answer
+      try {
+        await supabase
+          .from('chat_history')
+          .insert({
+            user_id: userId,
+            question: question,
+            answer: "Ich konnte keine relevanten Informationen im Dokument finden, um deine Frage zu beantworten.",
+            document_id: documentId
+          });
+      } catch (historyError) {
+        console.error('Error storing chat history:', historyError);
+      }
+      
+      return { 
+        answer: "Ich konnte keine relevanten Informationen im Dokument finden, um deine Frage zu beantworten.",
+        relevantChunks: [],
+        debug: debugInfo
+      };
     }
     
     // Generate answer
     const answer = await generateAnswer(question, relevantChunks, documentTitle);
     console.log('Generated answer');
     
-    // Store the chat history
-    const { error: historyError } = await supabase
-      .from('chat_history')
-      .insert({
-        user_id: userId,
-        question: question,
-        answer: answer,
-        document_id: documentId
-      });
+    // Update debug info
+    debugInfo.answerLength = answer.length;
     
-    if (historyError) {
+    // Store the chat history
+    try {
+      const { error: historyError } = await supabase
+        .from('chat_history')
+        .insert({
+          user_id: userId,
+          question: question,
+          answer: answer,
+          document_id: documentId
+        });
+      
+      if (historyError) {
+        console.error('Error storing chat history:', historyError);
+      } else {
+        console.log('Stored chat history');
+      }
+    } catch (historyError) {
       console.error('Error storing chat history:', historyError);
-      throw historyError;
     }
     
-    console.log('Stored chat history');
-    return { answer };
+    return { 
+      answer, 
+      relevantChunks: relevantChunks.map(chunk => ({
+        chunkIndex: chunk.chunk_index,
+        similarity: chunk.similarity,
+        contentPreview: chunk.content.substring(0, 100) + '...'
+      })),
+      debug: debugInfo
+    };
   } catch (error) {
     console.error('Error in chat with document:', error);
     throw error;
@@ -253,7 +360,7 @@ Deno.serve(async (req) => {
     console.error('Error:', error);
     
     return new Response(
-      JSON.stringify({ error: error.message }),
+      JSON.stringify({ error: error.message, stack: error.stack }),
       { 
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         status: 500 
