@@ -1,5 +1,6 @@
 
 import React from 'react';
+import { FileText } from 'lucide-react';
 import Header from '@/components/Header';
 import HeroSection from '@/components/HeroSection';
 
