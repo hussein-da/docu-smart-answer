@@ -19,21 +19,48 @@ export default function AuthPage() {
     setIsLoading(true);
 
     try {
-      const { error } = isSignUp 
-        ? await supabase.auth.signUp({ email, password })
-        : await supabase.auth.signInWithPassword({ email, password });
+      if (isSignUp) {
+        // Bei Registrierung
+        const { error: signUpError } = await supabase.auth.signUp({ 
+          email, 
+          password,
+          options: {
+            emailRedirectTo: window.location.origin
+          }
+        });
 
-      if (error) throw error;
+        if (signUpError) throw signUpError;
 
-      toast({
-        title: isSignUp ? "Account created!" : "Welcome back!",
-        description: isSignUp ? "Please check your email to verify your account." : "Successfully logged in.",
-      });
+        // Nachdem die Registrierung erfolgreich war, direkt anmelden
+        const { error: signInError } = await supabase.auth.signInWithPassword({ 
+          email, 
+          password 
+        });
 
-      if (!isSignUp) navigate('/documents');
+        if (signInError) throw signInError;
+
+        toast({
+          title: "Konto erstellt und angemeldet!",
+          description: "Du wurdest erfolgreich registriert und angemeldet.",
+        });
+
+        // Nach erfolgreicher Anmeldung zur Dokumente-Seite navigieren
+        navigate('/documents');
+      } else {
+        // Bei Login
+        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+
+        toast({
+          title: "Willkommen zurück!",
+          description: "Du wurdest erfolgreich angemeldet.",
+        });
+
+        navigate('/documents');
+      }
     } catch (error: any) {
       toast({
-        title: "Error",
+        title: "Fehler",
         description: error.message,
         variant: "destructive",
       });
