@@ -16,6 +16,12 @@ const supabase = createClient(supabaseUrl, supabaseServiceKey);
 // OpenAI API
 const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY') ?? '';
 
+// CORS headers
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+};
+
 // Function to create embeddings using OpenAI's API
 async function createEmbedding(text: string): Promise<number[]> {
   try {
@@ -33,6 +39,7 @@ async function createEmbedding(text: string): Promise<number[]> {
     
     if (!response.ok) {
       const errorData = await response.json();
+      console.error('OpenAI API error response:', errorData);
       throw new Error(`OpenAI API error: ${JSON.stringify(errorData)}`);
     }
     
@@ -47,6 +54,27 @@ async function createEmbedding(text: string): Promise<number[]> {
 // Function to get relevant chunks based on semantic similarity
 async function getRelevantChunks(documentId: string, questionEmbedding: number[], limit: number = 5) {
   try {
+    console.log(`Getting relevant chunks for document ${documentId}`);
+    
+    // First check if there are any chunks for this document
+    const { data: chunkCount, error: countError } = await supabase
+      .from('document_chunks')
+      .select('id', { count: 'exact', head: true })
+      .eq('document_id', documentId);
+    
+    if (countError) {
+      console.error('Error checking document chunks:', countError);
+      throw countError;
+    }
+    
+    console.log(`Document has ${chunkCount?.length || 0} chunks`);
+    
+    if (!chunkCount || chunkCount.length === 0) {
+      console.log('No chunks found for this document. Document may not be processed yet.');
+      return [];
+    }
+    
+    // Get relevant chunks using the match_document_chunks function
     const { data: chunks, error } = await supabase.rpc(
       'match_document_chunks',
       {
@@ -60,6 +88,13 @@ async function getRelevantChunks(documentId: string, questionEmbedding: number[]
     if (error) {
       console.error('Error in match_document_chunks:', error);
       throw error;
+    }
+    
+    console.log(`Found ${chunks?.length || 0} relevant chunks`);
+    if (chunks && chunks.length > 0) {
+      chunks.forEach((chunk, i) => {
+        console.log(`Chunk ${i} similarity: ${chunk.similarity.toFixed(3)}, content: ${chunk.content.substring(0, 50)}...`);
+      });
     }
     
     return chunks;
@@ -92,6 +127,7 @@ async function generateAnswer(question: string, chunks: any[], documentTitle: st
   try {
     // Prepare context from chunks
     const context = chunks.map(chunk => chunk.content).join('\n\n');
+    console.log(`Context length for OpenAI: ${context.length} characters`);
     
     // Create messages for the chat completion
     const messages = [
@@ -110,6 +146,7 @@ async function generateAnswer(question: string, chunks: any[], documentTitle: st
     ];
     
     // Call the OpenAI API
+    console.log('Calling OpenAI API to generate answer');
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -126,10 +163,12 @@ async function generateAnswer(question: string, chunks: any[], documentTitle: st
     
     if (!response.ok) {
       const errorData = await response.json();
+      console.error('OpenAI API error response:', errorData);
       throw new Error(`OpenAI API error: ${JSON.stringify(errorData)}`);
     }
     
     const data = await response.json();
+    console.log('Answer generated successfully');
     return data.choices[0].message.content;
   } catch (error) {
     console.error('Error generating answer:', error);
@@ -185,12 +224,6 @@ async function chatWithDocument(documentId: string, question: string, userId: st
   }
 }
 
-// CORS headers
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-};
-
 // Main Deno server
 Deno.serve(async (req) => {
   try {
@@ -205,7 +238,7 @@ Deno.serve(async (req) => {
     if (!requestData.documentId || !requestData.question || !requestData.userId) {
       return new Response(
         JSON.stringify({ error: 'documentId, question and userId are required' }),
-        { headers: { ...headers, 'Content-Type': 'application/json' }, status: 400 }
+        { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
       );
     }
 
