@@ -57,7 +57,10 @@ async function getRelevantChunks(documentId: string, questionEmbedding: number[]
       }
     );
     
-    if (error) throw error;
+    if (error) {
+      console.error('Error in match_document_chunks:', error);
+      throw error;
+    }
     
     return chunks;
   } catch (error) {
@@ -137,14 +140,19 @@ async function generateAnswer(question: string, chunks: any[], documentTitle: st
 // Main chat function
 async function chatWithDocument(documentId: string, question: string, userId: string) {
   try {
+    console.log('Starting chat with document:', { documentId, question, userId });
+    
     // Generate embedding for the question
     const questionEmbedding = await createEmbedding(question);
+    console.log('Created question embedding');
     
     // Get the document title
     const documentTitle = await getDocumentTitle(documentId);
+    console.log('Got document title:', documentTitle);
     
     // Get relevant chunks
     const relevantChunks = await getRelevantChunks(documentId, questionEmbedding);
+    console.log('Got relevant chunks:', relevantChunks?.length || 0);
     
     if (!relevantChunks || relevantChunks.length === 0) {
       return { answer: "Ich konnte keine relevanten Informationen im Dokument finden, um deine Frage zu beantworten." };
@@ -152,6 +160,7 @@ async function chatWithDocument(documentId: string, question: string, userId: st
     
     // Generate answer
     const answer = await generateAnswer(question, relevantChunks, documentTitle);
+    console.log('Generated answer');
     
     // Store the chat history
     const { error: historyError } = await supabase
@@ -163,8 +172,12 @@ async function chatWithDocument(documentId: string, question: string, userId: st
         document_id: documentId
       });
     
-    if (historyError) throw historyError;
+    if (historyError) {
+      console.error('Error storing chat history:', historyError);
+      throw historyError;
+    }
     
+    console.log('Stored chat history');
     return { answer };
   } catch (error) {
     console.error('Error in chat with document:', error);
@@ -172,34 +185,19 @@ async function chatWithDocument(documentId: string, question: string, userId: st
   }
 }
 
-// Create the RPC function for matching document chunks based on embedding
-async function createMatchFunction() {
-  try {
-    const { error } = await supabase.rpc('create_match_function', {});
-    if (error) throw error;
-    return { success: true };
-  } catch (error) {
-    console.error('Error creating match function:', error);
-    throw error;
-  }
-}
+// CORS headers
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+};
 
 // Main Deno server
 Deno.serve(async (req) => {
   try {
-    // CORS headers
-    const headers = {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-    };
-
     // Handle CORS preflight request
     if (req.method === 'OPTIONS') {
-      return new Response('ok', { headers });
+      return new Response('ok', { headers: corsHeaders });
     }
-
-    // Create the match function if it doesn't exist
-    await createMatchFunction();
 
     // Parse request
     const requestData: ChatRequest = await req.json();
@@ -216,7 +214,7 @@ Deno.serve(async (req) => {
     
     return new Response(
       JSON.stringify(result),
-      { headers: { ...headers, 'Content-Type': 'application/json' } }
+      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
   } catch (error) {
     console.error('Error:', error);
@@ -224,7 +222,7 @@ Deno.serve(async (req) => {
     return new Response(
       JSON.stringify({ error: error.message }),
       { 
-        headers: { 'Content-Type': 'application/json' },
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         status: 500 
       }
     );

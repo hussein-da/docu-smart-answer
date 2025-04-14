@@ -340,6 +340,21 @@ export type Database = {
         Args: { "": unknown } | { "": unknown } | { "": string }
         Returns: unknown
       }
+      match_document_chunks: {
+        Args: {
+          query_embedding: string
+          document_id_filter: string
+          match_threshold: number
+          match_count: number
+        }
+        Returns: {
+          id: string
+          document_id: string
+          chunk_index: number
+          content: string
+          similarity: number
+        }[]
+      }
       sparsevec_out: {
         Args: { "": unknown }
         Returns: unknown
