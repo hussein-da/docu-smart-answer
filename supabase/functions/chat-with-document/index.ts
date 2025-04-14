@@ -1,155 +1,231 @@
 
-import "https://deno.land/x/xhr@0.1.0/mod.ts";
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.6'
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-};
-
-interface ChatRequestBody {
-  question: string;
+// Request interface
+interface ChatRequest {
   documentId: string;
+  question: string;
+  userId: string;
 }
 
-interface DocumentChunk {
-  content: string;
-  document_id: string;
-  embedding: number[];
-}
+// Supabase client
+const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
+const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-serve(async (req) => {
-  // CORS preflight
-  if (req.method === 'OPTIONS') {
-    return new Response(null, { headers: corsHeaders });
-  }
+// OpenAI API
+const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY') ?? '';
 
+// Function to create embeddings using OpenAI's API
+async function createEmbedding(text: string): Promise<number[]> {
   try {
-    const openAiKey = Deno.env.get('OPENAI_API_KEY');
-    if (!openAiKey) {
-      throw new Error('OPENAI_API_KEY ist nicht konfiguriert');
-    }
-
-    // Supabase Client initialisieren
-    const supabaseUrl = Deno.env.get('SUPABASE_URL') || '';
-    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
-    const supabase = createClient(supabaseUrl, supabaseServiceKey);
-
-    // Request-Body parsen
-    const { question, documentId } = await req.json() as ChatRequestBody;
-
-    // Dokument-Info abrufen
-    const { data: documentData, error: docError } = await supabase
-      .from('documents')
-      .select('title, content_text')
-      .eq('id', documentId)
-      .single();
-
-    if (docError || !documentData) {
-      throw new Error(`Dokument nicht gefunden: ${docError?.message || 'Unbekannter Fehler'}`);
-    }
-
-    // Embeddings für die Frage mit OpenAI generieren
-    const embeddingResponse = await fetch('https://api.openai.com/v1/embeddings', {
+    const response = await fetch('https://api.openai.com/v1/embeddings', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${openAiKey}`,
         'Content-Type': 'application/json',
+        'Authorization': `Bearer ${OPENAI_API_KEY}`
       },
       body: JSON.stringify({
-        model: 'text-embedding-ada-002',
-        input: question
-      }),
+        input: text,
+        model: 'text-embedding-ada-002'
+      })
     });
-
-    const embeddingData = await embeddingResponse.json();
-    const questionEmbedding = embeddingData.data[0].embedding;
-
-    // Relevante Chunks aus dem Dokument basierend auf Embedding-Ähnlichkeit abrufen
-    // Hier vereinfachen wir und verwenden direkt den Dokumenteninhalt
-    // In einer vollständigen Implementierung würden wir Vector-Suche mit pgvector für die relevantesten Chunks verwenden
-
-    // Prompt für OpenAI zusammenstellen
-    const prompt = `
-    Du bist ein hilfreicher Assistent für die Dokumentenanalyse. 
-    Beantworte die folgende Frage basierend auf dem bereitgestellten Dokumenteninhalt.
     
-    Dokument: ${documentData.title}
-    
-    Dokumenteninhalt:
-    ${documentData.content_text || "Kein Textinhalt verfügbar."}
-    
-    Frage: ${question}
-    
-    Bitte beantworte die Frage präzise und beziehe dich nur auf Informationen, die im Dokument enthalten sind.
-    Wenn die Information nicht im Dokument zu finden ist, sage ehrlich, dass du es nicht weißt.
-    `;
-
-    // Chat completion mit OpenAI durchführen
-    const chatResponse = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${openAiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini', // oder ein anderes verfügbares Modell
-        messages: [
-          { role: 'system', content: 'Du bist ein präziser Dokumentenanalyst, der Fragen basierend auf dem Inhalt von Dokumenten beantwortet.' },
-          { role: 'user', content: prompt }
-        ],
-        temperature: 0.3,
-      }),
-    });
-
-    const chatData = await chatResponse.json();
-    const answer = chatData.choices[0].message.content;
-
-    // Chat-Verlauf speichern
-    const { error: chatHistoryError } = await supabase.from('chat_history').insert({
-      user_id: req.headers.get('authorization')?.split(' ')[1] || null,
-      question,
-      answer,
-      document_id: documentId
-    });
-
-    if (chatHistoryError) {
-      console.error('Fehler beim Speichern des Chat-Verlaufs:', chatHistoryError);
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(`OpenAI API error: ${JSON.stringify(errorData)}`);
     }
+    
+    const data = await response.json();
+    return data.data[0].embedding;
+  } catch (error) {
+    console.error('Error creating embedding:', error);
+    throw error;
+  }
+}
 
-    // Antwort zurückgeben
-    return new Response(
-      JSON.stringify({
-        answer,
-        sources: [
-          {
-            documentTitle: documentData.title,
-            text: documentData.content_text ? 
-              documentData.content_text.substring(0, 200) + '...' : 
-              'Kein Textinhalt verfügbar.'
-          }
-        ]
-      }),
-      { 
-        headers: { 
-          ...corsHeaders,
-          'Content-Type': 'application/json' 
-        } 
+// Function to get relevant chunks based on semantic similarity
+async function getRelevantChunks(documentId: string, questionEmbedding: number[], limit: number = 5) {
+  try {
+    const { data: chunks, error } = await supabase.rpc(
+      'match_document_chunks',
+      {
+        query_embedding: questionEmbedding,
+        document_id_filter: documentId,
+        match_threshold: 0.5,
+        match_count: limit
       }
     );
-
+    
+    if (error) throw error;
+    
+    return chunks;
   } catch (error) {
-    console.error('Error in chat-with-document function:', error);
+    console.error('Error getting relevant chunks:', error);
+    throw error;
+  }
+}
+
+// Function to get document title
+async function getDocumentTitle(documentId: string): Promise<string> {
+  try {
+    const { data, error } = await supabase
+      .from('documents')
+      .select('title')
+      .eq('id', documentId)
+      .single();
+    
+    if (error) throw error;
+    
+    return data.title;
+  } catch (error) {
+    console.error('Error getting document title:', error);
+    throw error;
+  }
+}
+
+// Function to generate an answer using OpenAI
+async function generateAnswer(question: string, chunks: any[], documentTitle: string): Promise<string> {
+  try {
+    // Prepare context from chunks
+    const context = chunks.map(chunk => chunk.content).join('\n\n');
+    
+    // Create messages for the chat completion
+    const messages = [
+      {
+        role: "system",
+        content: `Du bist ein hilfreicher Assistent für Dokumentenanalyse. 
+        Beantworte die Frage basierend nur auf dem folgenden Kontext aus dem Dokument "${documentTitle}". 
+        Wenn die Antwort nicht im Kontext enthalten ist, sage "Ich kann diese Frage basierend auf dem Dokument nicht beantworten." 
+        Gib keine Informationen weiter, die nicht im Kontext enthalten sind. 
+        Antworte auf Deutsch.`
+      },
+      {
+        role: "user",
+        content: `Kontext: ${context}\n\nFrage: ${question}`
+      }
+    ];
+    
+    // Call the OpenAI API
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: 'gpt-3.5-turbo',
+        messages: messages,
+        temperature: 0.3,
+        max_tokens: 800
+      })
+    });
+    
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(`OpenAI API error: ${JSON.stringify(errorData)}`);
+    }
+    
+    const data = await response.json();
+    return data.choices[0].message.content;
+  } catch (error) {
+    console.error('Error generating answer:', error);
+    throw error;
+  }
+}
+
+// Main chat function
+async function chatWithDocument(documentId: string, question: string, userId: string) {
+  try {
+    // Generate embedding for the question
+    const questionEmbedding = await createEmbedding(question);
+    
+    // Get the document title
+    const documentTitle = await getDocumentTitle(documentId);
+    
+    // Get relevant chunks
+    const relevantChunks = await getRelevantChunks(documentId, questionEmbedding);
+    
+    if (!relevantChunks || relevantChunks.length === 0) {
+      return { answer: "Ich konnte keine relevanten Informationen im Dokument finden, um deine Frage zu beantworten." };
+    }
+    
+    // Generate answer
+    const answer = await generateAnswer(question, relevantChunks, documentTitle);
+    
+    // Store the chat history
+    const { error: historyError } = await supabase
+      .from('chat_history')
+      .insert({
+        user_id: userId,
+        question: question,
+        answer: answer,
+        document_id: documentId
+      });
+    
+    if (historyError) throw historyError;
+    
+    return { answer };
+  } catch (error) {
+    console.error('Error in chat with document:', error);
+    throw error;
+  }
+}
+
+// Create the RPC function for matching document chunks based on embedding
+async function createMatchFunction() {
+  try {
+    const { error } = await supabase.rpc('create_match_function', {});
+    if (error) throw error;
+    return { success: true };
+  } catch (error) {
+    console.error('Error creating match function:', error);
+    throw error;
+  }
+}
+
+// Main Deno server
+Deno.serve(async (req) => {
+  try {
+    // CORS headers
+    const headers = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    };
+
+    // Handle CORS preflight request
+    if (req.method === 'OPTIONS') {
+      return new Response('ok', { headers });
+    }
+
+    // Create the match function if it doesn't exist
+    await createMatchFunction();
+
+    // Parse request
+    const requestData: ChatRequest = await req.json();
+    
+    if (!requestData.documentId || !requestData.question || !requestData.userId) {
+      return new Response(
+        JSON.stringify({ error: 'documentId, question and userId are required' }),
+        { headers: { ...headers, 'Content-Type': 'application/json' }, status: 400 }
+      );
+    }
+
+    // Chat with document
+    const result = await chatWithDocument(requestData.documentId, requestData.question, requestData.userId);
+    
+    return new Response(
+      JSON.stringify(result),
+      { headers: { ...headers, 'Content-Type': 'application/json' } }
+    );
+  } catch (error) {
+    console.error('Error:', error);
     
     return new Response(
       JSON.stringify({ error: error.message }),
       { 
-        status: 500, 
-        headers: { 
-          ...corsHeaders,
-          'Content-Type': 'application/json' 
-        } 
+        headers: { 'Content-Type': 'application/json' },
+        status: 500 
       }
     );
   }

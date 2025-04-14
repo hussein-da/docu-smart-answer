@@ -17,11 +17,13 @@ const queryClient = new QueryClient();
 
 const App = () => {
   const [session, setSession] = useState<Session | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     // Get initial session
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
+      setIsLoading(false);
     });
 
     // Listen for auth changes
@@ -34,6 +36,14 @@ const App = () => {
     return () => subscription.unsubscribe();
   }, []);
 
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="animate-spin h-10 w-10 border-4 border-docuchat-primary border-t-transparent rounded-full"></div>
+      </div>
+    );
+  }
+
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
@@ -42,7 +52,10 @@ const App = () => {
         <BrowserRouter>
           <Routes>
             <Route path="/" element={<Index />} />
-            <Route path="/auth" element={<AuthPage />} />
+            <Route 
+              path="/auth" 
+              element={session ? <Navigate to="/" /> : <AuthPage />} 
+            />
             <Route
               path="/documents"
               element={session ? <DocumentsPage /> : <Navigate to="/auth" />}

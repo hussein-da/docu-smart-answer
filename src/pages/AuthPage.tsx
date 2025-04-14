@@ -3,8 +3,10 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { useToast } from "@/components/ui/use-toast";
+import { toast } from "@/components/ui/use-toast";
 import { supabase } from '@/integrations/supabase/client';
+import { Loader2 } from 'lucide-react';
+import { FileText } from 'lucide-react';
 
 export default function AuthPage() {
   const [email, setEmail] = useState('');
@@ -12,7 +14,6 @@ export default function AuthPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [isSignUp, setIsSignUp] = useState(false);
   const navigate = useNavigate();
-  const { toast } = useToast();
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -21,7 +22,7 @@ export default function AuthPage() {
     try {
       if (isSignUp) {
         // Bei Registrierung
-        const { error: signUpError } = await supabase.auth.signUp({ 
+        const { data: signUpData, error: signUpError } = await supabase.auth.signUp({ 
           email, 
           password,
           options: {
@@ -30,22 +31,14 @@ export default function AuthPage() {
         });
 
         if (signUpError) throw signUpError;
-
-        // Nachdem die Registrierung erfolgreich war, direkt anmelden
-        const { error: signInError } = await supabase.auth.signInWithPassword({ 
-          email, 
-          password 
-        });
-
-        if (signInError) throw signInError;
-
-        toast({
-          title: "Konto erstellt und angemeldet!",
-          description: "Du wurdest erfolgreich registriert und angemeldet.",
-        });
-
-        // Nach erfolgreicher Anmeldung zur Dokumente-Seite navigieren
-        navigate('/documents');
+        
+        if (signUpData.user) {
+          toast({
+            title: "Konto erfolgreich erstellt!",
+            description: "Du wurdest automatisch angemeldet.",
+          });
+          navigate('/documents');
+        }
       } else {
         // Bei Login
         const { error } = await supabase.auth.signInWithPassword({ email, password });
@@ -59,9 +52,18 @@ export default function AuthPage() {
         navigate('/documents');
       }
     } catch (error: any) {
+      let errorMessage = error.message;
+      
+      // Benutzerfreundlichere Fehlermeldungen
+      if (error.message.includes("Email already registered")) {
+        errorMessage = "Diese E-Mail ist bereits registriert. Bitte melde dich an.";
+      } else if (error.message.includes("Invalid login credentials")) {
+        errorMessage = "Falsche E-Mail oder Passwort.";
+      }
+      
       toast({
         title: "Fehler",
-        description: error.message,
+        description: errorMessage,
         variant: "destructive",
       });
     } finally {
@@ -73,6 +75,9 @@ export default function AuthPage() {
     <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50 p-4">
       <div className="w-full max-w-md space-y-8 bg-white p-8 rounded-lg shadow-md">
         <div className="text-center">
+          <div className="flex justify-center mb-4">
+            <FileText className="h-10 w-10 text-docuchat-primary" />
+          </div>
           <h2 className="text-3xl font-bold text-gray-900">
             {isSignUp ? 'Erstelle einen Account' : 'Willkommen zurück'}
           </h2>
@@ -98,10 +103,23 @@ export default function AuthPage() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
+              minLength={6}
             />
+            {isSignUp && (
+              <p className="text-xs text-gray-500 mt-1">
+                Das Passwort muss mindestens 6 Zeichen lang sein.
+              </p>
+            )}
           </div>
           <Button type="submit" className="w-full" disabled={isLoading}>
-            {isLoading ? 'Wird verarbeitet...' : isSignUp ? 'Registrieren' : 'Anmelden'}
+            {isLoading ? (
+              <>
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                {isSignUp ? 'Registriere...' : 'Melde an...'}
+              </>
+            ) : (
+              isSignUp ? 'Registrieren' : 'Anmelden'
+            )}
           </Button>
         </form>
 
@@ -117,4 +135,4 @@ export default function AuthPage() {
       </div>
     </div>
   );
-}
+};

@@ -1,157 +1,212 @@
 
-import "https://deno.land/x/xhr@0.1.0/mod.ts";
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.6'
+import { load } from "https://esm.sh/cheerio@1.0.0-rc.12"
+import { encode } from "https://esm.sh/gpt-tokenizer@2.1.2"
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-};
-
-interface ProcessDocumentRequest {
+interface ProcessRequest {
   documentId: string;
 }
 
-serve(async (req) => {
-  // CORS preflight
-  if (req.method === 'OPTIONS') {
-    return new Response(null, { headers: corsHeaders });
-  }
+// Supabase client
+const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? '';
+const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
+// OpenAI embedding endpoint
+const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY') ?? '';
+
+// Function to extract and process text from PDFs or text files
+async function extractTextFromDocument(filePath: string, fileType: string): Promise<string> {
   try {
-    const openAiKey = Deno.env.get('OPENAI_API_KEY');
-    if (!openAiKey) {
-      throw new Error('OPENAI_API_KEY ist nicht konfiguriert');
+    // Get the file from storage
+    const { data: fileData, error: fileError } = await supabase
+      .storage
+      .from('documents')
+      .download(filePath);
+    
+    if (fileError) throw fileError;
+
+    // Process based on file type
+    if (fileType === 'application/pdf') {
+      // For PDF files, we'd use a PDF parser here
+      // This is a simplified approach - in a real app, use a proper PDF parser
+      const text = await parseTextFromFile(fileData);
+      return text;
+    } else if (fileType === 'text/plain') {
+      // For text files, just read the text
+      const text = await fileData.text();
+      return text;
+    } else {
+      throw new Error(`Unsupported file type: ${fileType}`);
     }
+  } catch (error) {
+    console.error('Error extracting text:', error);
+    throw error;
+  }
+}
 
-    // Supabase Client initialisieren
-    const supabaseUrl = Deno.env.get('SUPABASE_URL') || '';
-    const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
-    const supabase = createClient(supabaseUrl, supabaseServiceKey);
+// Parse text from a file (simplified for this example)
+async function parseTextFromFile(file: Blob): Promise<string> {
+  try {
+    // For simplicity, just read the text from the file
+    // In a real app, you would use a proper PDF parser
+    const text = await file.text();
+    // For PDFs, we would extract text from the PDF here
+    return text;
+  } catch (error) {
+    console.error('Error parsing file:', error);
+    throw error;
+  }
+}
 
-    // Request-Body parsen
-    const { documentId } = await req.json() as ProcessDocumentRequest;
+// Function to split text into chunks
+function splitTextIntoChunks(text: string, maxChunkLength: number = 1500): string[] {
+  const chunks: string[] = [];
+  let currentChunk = '';
+  const sentences = text.split(/(?<=[.!?])\s+/);
+  
+  for (const sentence of sentences) {
+    // Check if adding this sentence would make the chunk too long
+    if ((currentChunk + sentence).length <= maxChunkLength) {
+      currentChunk += sentence + ' ';
+    } else {
+      // If the current chunk is not empty, add it to the chunks array
+      if (currentChunk.length > 0) {
+        chunks.push(currentChunk.trim());
+      }
+      
+      // Start a new chunk with the current sentence
+      currentChunk = sentence + ' ';
+    }
+  }
+  
+  // Add the last chunk if not empty
+  if (currentChunk.length > 0) {
+    chunks.push(currentChunk.trim());
+  }
+  
+  return chunks;
+}
 
-    // Dokument-Info abrufen
-    const { data: documentData, error: docError } = await supabase
+// Function to create embeddings using OpenAI's API
+async function createEmbedding(text: string): Promise<number[]> {
+  try {
+    const response = await fetch('https://api.openai.com/v1/embeddings', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${OPENAI_API_KEY}`
+      },
+      body: JSON.stringify({
+        input: text,
+        model: 'text-embedding-ada-002'
+      })
+    });
+    
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(`OpenAI API error: ${JSON.stringify(errorData)}`);
+    }
+    
+    const data = await response.json();
+    return data.data[0].embedding;
+  } catch (error) {
+    console.error('Error creating embedding:', error);
+    throw error;
+  }
+}
+
+// Main function to process a document
+async function processDocument(documentId: string) {
+  try {
+    // Get document metadata from the database
+    const { data: document, error: documentError } = await supabase
       .from('documents')
       .select('*')
       .eq('id', documentId)
       .single();
-
-    if (docError || !documentData) {
-      throw new Error(`Dokument nicht gefunden: ${docError?.message || 'Unbekannter Fehler'}`);
-    }
-
-    // Dokumenteninhalt aus dem Storage holen
-    const { data: fileData, error: fileError } = await supabase.storage
-      .from('documents')
-      .download(`${documentData.user_id}/${documentData.file_path}`);
-
-    if (fileError || !fileData) {
-      throw new Error(`Fehler beim Abrufen der Datei: ${fileError?.message || 'Unbekannter Fehler'}`);
-    }
-
-    // Text-Extraktion basierend auf dem Dateityp
-    let text = '';
     
-    if (documentData.file_type === 'text/plain') {
-      // Für Textdateien
-      text = await fileData.text();
-    } else if (documentData.file_type === 'application/pdf') {
-      // Für PDF-Dateien würden wir hier eine PDF-Extraction-Bibliothek verwenden
-      // In dieser vereinfachten Version geben wir eine Nachricht zurück
-      text = "PDF-Extraktion simuliert. In einer vollständigen Implementierung würde hier der extrahierte Text aus dem PDF stehen.";
-    } else {
-      text = "Nicht unterstütztes Dateiformat für Textextraktion.";
-    }
-
-    // Text in Chunks aufteilen (vereinfacht)
-    // In einer vollständigen Implementierung würden wir den Text intelligent in semantische Chunks teilen
-    const chunkSize = 1000;
-    const chunks = [];
+    if (documentError) throw documentError;
     
-    for (let i = 0; i < text.length; i += chunkSize) {
-      chunks.push(text.substring(i, i + chunkSize));
-    }
-
-    // Dokument mit extrahiertem Text aktualisieren
+    // Extract text from the document
+    const text = await extractTextFromDocument(document.file_path, document.file_type);
+    
+    // Update document with extracted text
     const { error: updateError } = await supabase
       .from('documents')
       .update({ content_text: text })
       .eq('id', documentId);
-
-    if (updateError) {
-      throw new Error(`Fehler beim Aktualisieren des Dokuments: ${updateError.message}`);
-    }
-
-    // Embeddings für jeden Chunk erstellen und speichern
+    
+    if (updateError) throw updateError;
+    
+    // Split text into chunks
+    const chunks = splitTextIntoChunks(text);
+    
+    // Process each chunk and create embeddings
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i];
       
-      // Embedding mit OpenAI erstellen
-      const embeddingResponse = await fetch('https://api.openai.com/v1/embeddings', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${openAiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: 'text-embedding-ada-002',
-          input: chunk
-        }),
-      });
-
-      const embeddingData = await embeddingResponse.json();
+      // Create embedding for the chunk
+      const embedding = await createEmbedding(chunk);
       
-      if (!embeddingData.data || !embeddingData.data[0]) {
-        console.error('Fehler beim Erstellen des Embeddings:', embeddingData);
-        continue;
-      }
-      
-      const embedding = embeddingData.data[0].embedding;
-
-      // Chunk mit Embedding in der Datenbank speichern
+      // Store chunk and embedding in the database
       const { error: chunkError } = await supabase
         .from('document_chunks')
         .insert({
           document_id: documentId,
           chunk_index: i,
           content: chunk,
-          embedding
+          embedding: embedding
         });
+      
+      if (chunkError) throw chunkError;
+    }
+    
+    return { success: true, message: 'Document processed successfully' };
+  } catch (error) {
+    console.error('Error processing document:', error);
+    throw error;
+  }
+}
 
-      if (chunkError) {
-        console.error(`Fehler beim Speichern des Chunks ${i}:`, chunkError);
-      }
+Deno.serve(async (req) => {
+  try {
+    // CORS headers
+    const headers = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+    };
+
+    // Handle CORS preflight request
+    if (req.method === 'OPTIONS') {
+      return new Response('ok', { headers });
     }
 
-    // Erfolgreiche Antwort zurückgeben
-    return new Response(
-      JSON.stringify({ 
-        success: true, 
-        message: 'Dokument erfolgreich verarbeitet',
-        chunks_processed: chunks.length
-      }),
-      { 
-        headers: { 
-          ...corsHeaders,
-          'Content-Type': 'application/json' 
-        } 
-      }
-    );
+    // Parse request
+    const requestData: ProcessRequest = await req.json();
+    
+    if (!requestData.documentId) {
+      return new Response(
+        JSON.stringify({ error: 'documentId is required' }),
+        { headers: { ...headers, 'Content-Type': 'application/json' }, status: 400 }
+      );
+    }
 
+    // Process document
+    const result = await processDocument(requestData.documentId);
+    
+    return new Response(
+      JSON.stringify(result),
+      { headers: { ...headers, 'Content-Type': 'application/json' } }
+    );
   } catch (error) {
-    console.error('Error in process-document function:', error);
+    console.error('Error:', error);
     
     return new Response(
       JSON.stringify({ error: error.message }),
       { 
-        status: 500, 
-        headers: { 
-          ...corsHeaders,
-          'Content-Type': 'application/json' 
-        } 
+        headers: { 'Content-Type': 'application/json' },
+        status: 500 
       }
     );
   }

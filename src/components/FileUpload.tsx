@@ -3,6 +3,9 @@ import React, { useState } from 'react';
 import { Upload, File, CheckCircle, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
+import { toast } from '@/components/ui/use-toast';
+import { supabase } from '@/integrations/supabase/client';
+import { useNavigate } from 'react-router-dom';
 
 const FileUpload = () => {
   const [isDragging, setIsDragging] = useState(false);
@@ -11,6 +14,7 @@ const FileUpload = () => {
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  const navigate = useNavigate();
 
   const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
@@ -54,27 +58,88 @@ const FileUpload = () => {
     setError(null);
   };
 
-  const uploadFile = () => {
+  const uploadFile = async () => {
     if (!file) return;
     
-    setUploading(true);
-    setProgress(0);
-    
-    // Simulate progress
-    const interval = setInterval(() => {
-      setProgress(prev => {
-        if (prev >= 100) {
-          clearInterval(interval);
-          setUploading(false);
-          setSuccess(true);
-          return 100;
-        }
-        return prev + 10;
+    try {
+      setUploading(true);
+      setProgress(0);
+      
+      // Get current user
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        throw new Error('Nicht eingeloggt');
+      }
+      
+      // Create folder path for the current user
+      const folderPath = `${user.id}/${Date.now()}_${file.name}`;
+      
+      // Upload file to Supabase Storage
+      const { error: uploadError, data } = await supabase.storage
+        .from('documents')
+        .upload(folderPath, file, {
+          cacheControl: '3600',
+          upsert: false,
+          onUploadProgress: (progress) => {
+            const percent = Math.round((progress.loaded / progress.total) * 50);
+            setProgress(percent); // Up to 50% for upload progress
+          },
+        });
+        
+      if (uploadError) throw uploadError;
+      
+      // Create database record
+      const { error: dbError, data: document } = await supabase
+        .from('documents')
+        .insert({
+          title: file.name,
+          file_path: folderPath,
+          file_type: file.type,
+          file_size: file.size,
+          page_count: file.type === 'application/pdf' ? null : 1, // Set page count for text files
+          user_id: user.id
+        })
+        .select()
+        .single();
+        
+      if (dbError) throw dbError;
+      
+      // Trigger document processing function
+      const { error: processingError } = await supabase.functions.invoke('process-document', {
+        body: { documentId: document.id }
       });
-    }, 300);
-    
-    // In a real application, we would upload to Supabase here
-    // and process the file on the server
+      
+      if (processingError) throw processingError;
+      
+      // Simulating processing time for the remaining 50%
+      let currentProgress = 50;
+      const interval = setInterval(() => {
+        currentProgress += 5;
+        setProgress(currentProgress);
+        
+        if (currentProgress >= 100) {
+          clearInterval(interval);
+          setSuccess(true);
+          setUploading(false);
+          
+          toast({
+            title: "Dokument erfolgreich verarbeitet",
+            description: "Dein Dokument wurde hochgeladen und kann nun verwendet werden.",
+          });
+        }
+      }, 300);
+      
+    } catch (error: any) {
+      console.error('Error uploading document:', error);
+      setError(error.message || 'Fehler beim Hochladen des Dokuments');
+      setUploading(false);
+      
+      toast({
+        title: "Fehler beim Hochladen",
+        description: error.message || 'Fehler beim Hochladen des Dokuments',
+        variant: "destructive",
+      });
+    }
   };
 
   const resetUpload = () => {
@@ -84,11 +149,15 @@ const FileUpload = () => {
     setError(null);
   };
 
+  const goToDocuments = () => {
+    navigate('/documents');
+  };
+
   return (
     <div className="w-full max-w-2xl mx-auto">
       {!file ? (
         <div
-          className={`file-upload-zone ${isDragging ? 'border-primary bg-primary/5' : ''}`}
+          className={`border-2 border-dashed rounded-lg p-8 text-center transition-colors ${isDragging ? 'border-primary bg-primary/5' : 'border-gray-300'}`}
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
@@ -135,7 +204,7 @@ const FileUpload = () => {
               {success && (
                 <div className="mt-2 flex items-center text-green-600">
                   <CheckCircle className="h-4 w-4 mr-2" />
-                  <span>Erfolgreich hochgeladen</span>
+                  <span>Erfolgreich hochgeladen und verarbeitet</span>
                 </div>
               )}
             </div>
@@ -150,8 +219,8 @@ const FileUpload = () => {
                 {uploading ? 'Wird hochgeladen...' : 'Hochladen'}
               </Button>
             ) : (
-              <Button variant="outline" onClick={resetUpload}>
-                Neue Datei
+              <Button onClick={goToDocuments}>
+                Zu meinen Dokumenten
               </Button>
             )}
           </div>
