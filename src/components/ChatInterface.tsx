@@ -2,7 +2,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { PaperPlaneIcon, Loader2 } from 'lucide-react';
+import { Send, Loader2 } from 'lucide-react';
 import { supabase } from '@/integrations/supabase/client';
 import { toast } from '@/components/ui/use-toast';
 
@@ -275,7 +275,7 @@ const ChatInterface = ({ documentId }: ChatInterfaceProps) => {
             {isLoading ? (
               <Loader2 className="h-5 w-5 animate-spin" />
             ) : (
-              <PaperPlaneIcon className="h-5 w-5" />
+              <Send className="h-5 w-5" />
             )}
           </Button>
         </div>

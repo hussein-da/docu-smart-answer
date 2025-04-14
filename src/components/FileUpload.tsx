@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import { Upload, File, CheckCircle, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -74,19 +73,18 @@ const FileUpload = () => {
       // Create folder path for the current user
       const folderPath = `${user.id}/${Date.now()}_${file.name}`;
       
-      // Upload file to Supabase Storage
+      // Upload file to Supabase Storage without onUploadProgress
       const { error: uploadError, data } = await supabase.storage
         .from('documents')
         .upload(folderPath, file, {
           cacheControl: '3600',
-          upsert: false,
-          onUploadProgress: (progress) => {
-            const percent = Math.round((progress.loaded / progress.total) * 50);
-            setProgress(percent); // Up to 50% for upload progress
-          },
+          upsert: false
         });
         
       if (uploadError) throw uploadError;
+      
+      // Set progress to 50% after upload completes
+      setProgress(50);
       
       // Create database record
       const { error: dbError, data: document } = await supabase
